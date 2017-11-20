@@ -1,0 +1,2 @@
+include versioneer.py
+include zipline_extensions/_version.py
