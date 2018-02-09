@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import io
-import pytz
 import zipline
 import pandas as pd
 from quantrocket.history import get_db_config, download_history_file
@@ -52,7 +51,7 @@ class QuantRocketHistoryBundler(object):
         self.bar_size = self.db_config.get("bar_size", None)
 
         if self.bar_size not in ("1 min", "1 day"):
-            raise BadArgument(
+            raise BadIngestionArgument(
                 "Zipline requires 1 minute or 1 day bars, but {0} has {1} bars".format(
                 self.code, self.bar_size)
             )
@@ -60,7 +59,7 @@ class QuantRocketHistoryBundler(object):
         self.universes = self.db_config.get("universes", None)
 
         if not self.universes:
-            raise BadArgument(
+            raise BadIngestionArgument(
                 "1 or more universes is required but {0} defines none".format(self.code))
 
     def build_and_register(self):
