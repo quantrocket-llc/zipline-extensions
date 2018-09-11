@@ -368,7 +368,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         Queries history one conid at a time and places the price history on
         the ingestion queue.
         """
-        for conid in list(self.securities.index):
+        for conid, security in self.securities.iterrows():
 
             f = io.StringIO()
             try:
@@ -380,7 +380,8 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
                     fields=["Open","Close","High","Low","Volume"])
             except requests.HTTPError as e:
                 if "no history matches the query parameters" in repr(e):
-                    print("No history to ingest for conid {0}".format(conid))
+                    print("No history to ingest for {0} {1} (conid {2})".format(
+                        security.Symbol, security.SecType, conid))
                     continue
                 else:
                     raise
@@ -405,7 +406,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             # memory.
             while True:
                 try:
-                    self.ingestion_queue.put((conid, prices), timeout=5)
+                    self.ingestion_queue.put((conid, security, prices), timeout=5)
                 except queue.Full:
                     if self.worker_exception:
                         print("exiting main thread after exception in ingestion thread")
@@ -428,9 +429,11 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             if security is None:
                 break
 
-            conid, prices = security
+            conid, security, prices = security
 
-            print("ingesting conid {0}".format(conid))
+            print("Ingesting {0} bars for {1} {2} (conid {3})".format(
+                len(prices.index), security.Symbol, security.SecType, conid))
+
             yield conid, prices
 
 def make_ingest_func(
@@ -459,7 +462,6 @@ def make_ingest_func(
     if not universes and not conids:
         raise BadIngestionArgument(
             "1 or more universes is required but {0} defines none".format(code))
-
 
     if bar_size == "1 day":
         ingester_cls = DailyHistoryIngester
