@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .history import QuantRocketHistoryBundler
+from .history import make_ingest_func, MINUTES_PER_DAY_PER_EXCHANGE

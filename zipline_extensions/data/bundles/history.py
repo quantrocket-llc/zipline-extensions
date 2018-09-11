@@ -13,11 +13,14 @@
 # limitations under the License.
 
 import io
-import zipline
+import requests
 import pandas as pd
+import threading
+import queue
+from functools import wraps
 from quantrocket.history import get_db_config, download_history_file
 from quantrocket.master import download_master_file
-from zipline_extensions.errors import BadIngestionArgument
+from zipline_extensions.errors import BadIngestionArgument, NoData
 
 # (for minutely bundles) minutes_per_day must be passed to the
 # register function. Look these up per calendar in
@@ -33,110 +36,98 @@ MINUTES_PER_DAY_PER_EXCHANGE = {
     "TSX": 6.5*6, # 9:30AM-4PM
 }
 
-class QuantRocketHistoryBundler(object):
+class _BaseHistoryIngester:
 
-    def __init__(self, code, calendar=None, logger=None):
+    def __init__(
+        self,
+        code,
+        start_date=None,
+        end_date=None,
+        universes=None,
+        conids=None,
+        exclude_universes=None,
+        exclude_conids=None):
+
         self.code = code
-        self.calendar_name = calendar or "NYSE"
-        self.db_config = None
-        self.bar_size = None
-        self.universes = None
-        self.logger = logger
+        self.start_date = start_date
+        self.end_date = end_date
+        self.universes = universes
+        self.conids = conids
+        self.exclude_universes = exclude_universes
+        self.exclude_conids = exclude_conids
+        self.securities = None # DataFrame of securities
+        self.min_dates = None # Series of conid: min date
+        self.max_dates = None # Series of conid: max date
 
-    def validate_config(self):
+    def ingest(
+        self,
+        environ,
+        asset_db_writer,
+        minute_bar_writer,
+        daily_bar_writer,
+        adjustment_writer,
+        calendar,
+        start_session,
+        end_session,
+        cache,
+        show_progress,
+        output_dir):
+
+        self._get_securities()
+
+        self._write_bars(daily_bar_writer, minute_bar_writer)
+
+        self._write_assets(asset_db_writer)
+
+        # Call this so tables get created, otherwise zipline fails
+        adjustment_writer.write()
+
+    def _get_securities(self):
         """
-        Gets the db config and validates it.
+        Queries the master db and gets a securities master file.
         """
-        self.db_config = get_db_config(self.code)
-        self.bar_size = self.db_config.get("bar_size", None)
+        f = io.StringIO()
 
-        if self.bar_size not in ("1 min", "1 day"):
-            raise BadIngestionArgument(
-                "Zipline requires 1 minute or 1 day bars, but {0} has {1} bars".format(
-                self.code, self.bar_size)
-            )
+        download_master_file(
+            f,
+            universes=self.universes,
+            conids=self.conids,
+            exclude_universes=self.exclude_universes,
+            exclude_conids=self.exclude_conids,
+            delisted=True,
+            fields=["ConId", "PrimaryExchange", "Symbol", "SecType",
+                    "LocalSymbol", "LongName", "MinTick",
+                    "Multiplier", "LastTradeDate", "ContractMonth",
+                    "Timezone", "UnderConId"])
 
-        self.universes = self.db_config.get("universes", None)
+        self.securities = pd.read_csv(f, index_col="ConId")
 
-        if not self.universes:
-            raise BadIngestionArgument(
-                "1 or more universes is required but {0} defines none".format(self.code))
+    def _write_bars(self, daily_bar_writer, minute_bar_writer):
+        raise NotImplementedError()
 
-    def build_and_register(self):
-        """
-        Builds and registers a bundle ingestion function.
-        """
-
-        self.validate_config()
-
-        def quantrocket_history_bundle(
-            environ,
-            asset_db_writer,
-            minute_bar_writer,
-            daily_bar_writer,
-            adjustment_writer,
-            calendar,
-            start_session,
-            end_session,
-            cache,
-            show_progress,
-            output_dir):
-
-            f = io.StringIO()
-            download_history_file(self.code, f, fields=["Open","Close","High","Low","Volume"])
-            prices = pd.read_csv(f, index_col=["Date","ConId"],parse_dates=["Date"])
-
-            self._write_assets(prices, asset_db_writer)
-
-            if self.bar_size == "1 day":
-                self._write_daily_bars(prices, daily_bar_writer)
-            else:
-                self._write_minute_bars(prices, minute_bar_writer)
-
-            # Call this so tables get created, otherwise zipline fails
-            adjustment_writer.write()
-
-        minutes_per_day = MINUTES_PER_DAY_PER_EXCHANGE[self.calendar_name]
-        minutes_per_day = int(minutes_per_day)
-
-        zipline.data.bundles.register(
-            self.code, quantrocket_history_bundle, calendar_name=self.calendar_name,
-            minutes_per_day=minutes_per_day)
-
-    def _write_assets(self, prices, asset_db_writer):
+    def _write_assets(self, asset_db_writer):
         """
         Queries the master service and prepares the securities for the asset
         writer.
         """
 
-        f = io.StringIO()
+        self.min_dates.name = "start_date"
+        self.max_dates.name = "end_date"
+        # Join min and max dates, using inner join so as not to load any
+        # assets with no price history
+        self.securities = self.securities.join(self.min_dates, how="inner").join(self.max_dates, how="inner")
+        self.securities["first_traded"] = self.securities["start_date"]
 
-        download_master_file(
-            f, universes=self.universes,
-            delisted=True, fields=["ConId", "PrimaryExchange", "Symbol", "SecType",
-                                   "LocalSymbol", "LongName", "MinTick",
-                                   "Multiplier", "LastTradeDate", "ContractMonth",
-                                   "Timezone", "UnderConId"])
-
-        assets = pd.read_csv(f, index_col="ConId")
-        assets[["Symbol", "LocalSymbol"]] = assets[["Symbol", "LocalSymbol"]].astype(str)
-
-        grouped_by_conid = prices.reset_index().groupby("ConId")
-        max_dates = grouped_by_conid.Date.max()
-        min_dates = grouped_by_conid.Date.min()
-        min_dates.name = "start_date"
-        max_dates.name = "end_date"
-        assets = assets.join(min_dates).join(max_dates)
-        assets["first_traded"] = assets["start_date"]
+        self.securities[["Symbol", "LocalSymbol"]] = self.securities[["Symbol", "LocalSymbol"]].astype(str)
 
         exchanges = pd.DataFrame(
-            assets, columns=["PrimaryExchange","Timezone"]).drop_duplicates()
+            self.securities, columns=["PrimaryExchange","Timezone"]).drop_duplicates()
         exchanges = exchanges.rename(columns={
             "PrimaryExchange": "exchange",
             "Timezone": "timezone"
             })
 
-        equities = assets[assets.SecType == "STK"].copy()
+        equities = self.securities[self.securities.SecType == "STK"].copy()
         if equities.empty:
             equities = None
         else:
@@ -146,8 +137,10 @@ class QuantRocketHistoryBundler(object):
                 "Symbol": "symbol",
                 "LongName": "asset_name"
             })
+            # The auto_close date is the day after the last trade.
+            equities["auto_close_date"] = equities.end_date + pd.Timedelta(days=1)
 
-        futures = assets[assets.SecType == "FUT"].copy()
+        futures = self.securities[self.securities.SecType == "FUT"].copy()
         if futures.empty:
             futures = None
             root_symbols = None
@@ -176,25 +169,32 @@ class QuantRocketHistoryBundler(object):
                 exchanges=exchanges,
                 root_symbols=root_symbols)
 
-    def _write_minute_bars(self, prices, minute_bar_writer):
-        """
-        Queries history and passes it to minute bar writer.
-        """
-        panel = prices.to_panel().swapaxes("items","minor").rename(minor={
-            "Volume": "volume",
-            "Open": "open",
-            "Close": "close",
-            "High": "high",
-            "Low": "low"
-        })
+class DailyHistoryIngester(_BaseHistoryIngester):
 
-        minute_bar_writer.write(panel.iteritems(), show_progress=True)
-
-    def _write_daily_bars(self, prices, daily_bar_writer):
+    def _write_bars(self, daily_bar_writer, minute_bar_writer):
         """
         Queries history and passes it to daily bar writer.
         """
-        panel = prices.to_panel().swapaxes("items","minor").rename(minor={
+        f = io.StringIO()
+        download_history_file(
+            self.code, f,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            universes=self.universes,
+            conids=self.conids,
+            exclude_universes=self.exclude_universes,
+            exclude_conids=self.exclude_conids,
+            fields=["Open","Close","High","Low","Volume"])
+        prices = pd.read_csv(f, index_col=["Date","ConId"], parse_dates=["Date"])
+        del f
+
+        # store max and min dates for asset writer
+        grouped_by_conid = prices.reset_index().groupby("ConId")
+        self.max_dates = grouped_by_conid.Date.max()
+        self.min_dates = grouped_by_conid.Date.min()
+        del grouped_by_conid
+
+        prices = prices.to_panel().swapaxes("items","minor").rename(minor={
             "Volume": "volume",
             "Open": "open",
             "Close": "close",
@@ -202,8 +202,8 @@ class QuantRocketHistoryBundler(object):
             "Low": "low"
         })
 
-        panel = self._reindex_panel_for_mismatched_sessions(panel, daily_bar_writer)
-        daily_bar_writer.write(panel.iteritems(), assets=set(panel.items), show_progress=True)
+        prices = self._reindex_panel_for_mismatched_sessions(prices, daily_bar_writer)
+        daily_bar_writer.write(prices.iteritems(), assets=set(prices.items), show_progress=True)
 
     def _reindex_panel_for_mismatched_sessions(self, panel, daily_bar_writer):
 
@@ -256,11 +256,10 @@ class QuantRocketHistoryBundler(object):
                 extra_dates_msg += " and {0} more".format(len(extra) - 20)
 
         base_msg = "{0} calendar and {1} history do not align so re-indexing history to calendar".format(
-                   self.calendar_name, self.code)
+                   daily_bar_writer._calendar.name, self.code)
 
         msg = "; ".join([msg_part for msg_part in (base_msg, missing_dates_msg, extra_dates_msg) if msg_part])
-        if self.logger:
-            self.logger.warning(msg)
+        print(msg)
 
         panel = panel.reindex(major_axis=pd.to_datetime(asset_sessions.values))
 
@@ -303,3 +302,178 @@ class QuantRocketHistoryBundler(object):
         panel = panel.swapaxes("items","minor")
 
         return panel
+
+class MinutelyHistoryIngester(_BaseHistoryIngester):
+
+    def __init__(self, *args, **kwargs):
+        super(MinutelyHistoryIngester, self).__init__(*args, **kwargs)
+        # Create a one-item queue for Zipline's minute_bar_writer to consume
+        # items from
+        self.ingestion_queue = queue.Queue(maxsize=1)
+        self.ingestion_worker = None
+        self.worker_exception = None
+
+    def _write_bars(self, daily_bar_writer, minute_bar_writer):
+        """
+        Queries history database one conid at a time and passes it to minute
+        bar writer.
+        """
+        self.min_dates = {}
+        self.max_dates = {}
+
+        # Create a thread that will run minute_bar_writer.write, which will
+        # ingest data yielded from the queue in self._consume_prices
+        self.ingestion_worker = threading.Thread(
+            target=self._log_worker_exceptions(minute_bar_writer.write),
+            name="zipline_ingester",
+            args=(self._consume_prices(),),
+            kwargs=dict(show_progress=True)
+        )
+
+        self.ingestion_worker.start()
+
+        # Begin querying prices conid by conid
+        self._enqueue_prices()
+
+        # Place termination signal on queue
+        self.ingestion_queue.put(None)
+
+        self.ingestion_worker.join()
+
+        if not self.max_dates:
+            raise NoData("No data found in {0} matching the ingestion parameters".format(
+                self.code))
+
+        # Convert min and max dates from dicts to Series for asset writer
+        self.max_dates = pd.Series(self.max_dates)
+        self.min_dates = pd.Series(self.min_dates)
+
+    def _log_worker_exceptions(self, func):
+        """
+        Logs exceptions in the worker thread so that main thread knows.
+        """
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                self.worker_exception = e
+                raise
+
+        return wrapper
+
+    def _enqueue_prices(self):
+        """
+        Queries history one conid at a time and places the price history on
+        the ingestion queue.
+        """
+        for conid in list(self.securities.index):
+
+            f = io.StringIO()
+            try:
+                download_history_file(
+                    self.code, f,
+                    start_date=self.start_date,
+                    end_date=self.end_date,
+                    conids=[conid],
+                    fields=["Open","Close","High","Low","Volume"])
+            except requests.HTTPError as e:
+                if "no history matches the query parameters" in repr(e):
+                    print("No history to ingest for conid {0}".format(conid))
+                    continue
+                else:
+                    raise
+
+            prices = pd.read_csv(f, index_col=["Date"], parse_dates=["Date"]).drop("ConId", axis=1)
+            del f
+
+            # store max and min dates for asset writer
+            self.max_dates[conid] = prices.index[0]
+            self.min_dates[conid] = prices.index[-1]
+
+            prices = prices.rename(columns={
+                "Volume": "volume",
+                "Open": "open",
+                "Close": "close",
+                "High": "high",
+                "Low": "low"
+            })
+
+            # Due to the queue size of 1, this will block if anything is
+            # already on the queue. This prevents loading too much data into
+            # memory.
+            while True:
+                try:
+                    self.ingestion_queue.put((conid, prices), timeout=5)
+                except queue.Full:
+                    if self.worker_exception:
+                        print("exiting main thread after exception in ingestion thread")
+                        raise self.worker_exception
+                else:
+                    break
+
+    def _consume_prices(self):
+        """
+        Returns a generator that pulls (conid, prices) from the queue and
+        hands to Zipline for ingestion.
+        """
+
+        # Consume tasks from the queue
+        while True:
+
+            security = self.ingestion_queue.get()
+
+            # None indicates to terminate the worker
+            if security is None:
+                break
+
+            conid, prices = security
+
+            print("ingesting conid {0}".format(conid))
+            yield conid, prices
+
+def make_ingest_func(
+    code,
+    start_date=None,
+    end_date=None,
+    universes=None,
+    conids=None,
+    exclude_universes=None,
+    exclude_conids=None):
+    """
+    Returns a bundle ingestion function.
+    """
+
+    db_config = get_db_config(code)
+    bar_size = db_config.get("bar_size", None)
+
+    if bar_size not in ("1 min", "1 day"):
+        raise BadIngestionArgument(
+            "Zipline requires 1 minute or 1 day bars, but {0} has {1} bars".format(
+            code, bar_size)
+        )
+
+    universes = universes or db_config.get("universes", None)
+
+    if not universes and not conids:
+        raise BadIngestionArgument(
+            "1 or more universes is required but {0} defines none".format(code))
+
+
+    if bar_size == "1 day":
+        ingester_cls = DailyHistoryIngester
+    else:
+        ingester_cls = MinutelyHistoryIngester
+
+    ingester = ingester_cls(
+        code,
+        start_date=start_date,
+        end_date=end_date,
+        universes=universes,
+        conids=conids,
+        exclude_universes=exclude_universes,
+        exclude_conids=exclude_conids
+    )
+
+    return ingester.ingest
