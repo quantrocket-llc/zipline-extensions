@@ -390,8 +390,8 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             del f
 
             # store max and min dates for asset writer
-            self.max_dates[conid] = prices.index[0]
-            self.min_dates[conid] = prices.index[-1]
+            self.min_dates[conid] = prices.index[0]
+            self.max_dates[conid] = prices.index[-1]
 
             prices = prices.rename(columns={
                 "Volume": "volume",
