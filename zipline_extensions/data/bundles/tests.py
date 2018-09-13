@@ -17,9 +17,9 @@
 import unittest
 import pandas as pd
 import numpy as np
-from zipline_extensions.data.bundles.history import DailyHistoryBundler
+from zipline_extensions.data.bundles.history import DailyHistoryIngester
 
-class DailyHistoryBundlerTestCase(unittest.TestCase):
+class DailyHistoryIngesterTestCase(unittest.TestCase):
 
     def test_fillna_panel(self):
         symbol1 = pd.DataFrame(
@@ -40,7 +40,7 @@ class DailyHistoryBundlerTestCase(unittest.TestCase):
             index=[pd.Timestamp("2018-02-06"),
                    pd.Timestamp("2018-02-07")])
         panel = pd.Panel(data=dict(symbol1=symbol1, symbol2=symbol2))
-        panel = DailyHistoryBundler.fillna_panel(panel)
+        panel = DailyHistoryIngester.fillna_panel(panel)
         self.assertEqual(
             panel.symbol1.to_dict(orient="list"),
             {'close': [50.56, 50.56, 47.2],
