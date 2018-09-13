@@ -457,10 +457,10 @@ def make_ingest_func(
             code, bar_size)
         )
 
-    universes = universes or db_config.get("universes", None)
-
     if not universes and not conids:
-        raise BadIngestionArgument(
+        universes = db_config.get("universes", None)
+        if not universes:
+            raise BadIngestionArgument(
             "1 or more universes is required but {0} defines none".format(code))
 
     if bar_size == "1 day":
