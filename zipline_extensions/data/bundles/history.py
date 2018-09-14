@@ -17,10 +17,14 @@ import requests
 import pandas as pd
 import threading
 import queue
+import logging
 from functools import wraps
 from quantrocket.history import get_db_config, download_history_file
 from quantrocket.master import download_master_file
 from zipline_extensions.errors import BadIngestionArgument, NoData
+
+logger = logging.getLogger("quantrocket.zipline")
+logger.setLevel(logging.DEBUG)
 
 # (for minutely bundles) minutes_per_day must be passed to the
 # register function. Look these up per calendar in
@@ -100,7 +104,7 @@ class _BaseHistoryIngester:
                     "Multiplier", "LastTradeDate", "ContractMonth",
                     "Timezone", "UnderConId"])
 
-        self.securities = pd.read_csv(f, index_col="ConId")
+        self.securities = pd.read_csv(f, index_col="ConId").sort_values(by="Symbol")
 
     def _write_bars(self, daily_bar_writer, minute_bar_writer):
         raise NotImplementedError()
@@ -311,7 +315,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         # items from
         self.ingestion_queue = queue.Queue(maxsize=1)
         self.ingestion_worker = None
-        self.worker_exception = None
+        self.conids_with_errors = set()
 
     def _write_bars(self, daily_bar_writer, minute_bar_writer):
         """
@@ -321,13 +325,12 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         self.min_dates = {}
         self.max_dates = {}
 
-        # Create a thread that will run minute_bar_writer.write, which will
-        # ingest data yielded from the queue in self._consume_prices
+        # Create a thread that will run consume securities from the queue and
+        # pass to the minute_bar_writer
         self.ingestion_worker = threading.Thread(
-            target=self._log_worker_exceptions(minute_bar_writer.write),
+            target=self._consume_prices,
             name="zipline_ingester",
-            args=(self._consume_prices(),),
-            kwargs=dict(show_progress=True)
+            args=(minute_bar_writer,)
         )
 
         self.ingestion_worker.start()
@@ -340,6 +343,9 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
 
         self.ingestion_worker.join()
 
+        if self.conids_with_errors:
+            logger.error("skipped {0} securities with errors".format(len(self.conids_with_errors)))
+
         if not self.max_dates:
             raise NoData("No data found in {0} matching the ingestion parameters".format(
                 self.code))
@@ -347,21 +353,6 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         # Convert min and max dates from dicts to Series for asset writer
         self.max_dates = pd.Series(self.max_dates)
         self.min_dates = pd.Series(self.min_dates)
-
-    def _log_worker_exceptions(self, func):
-        """
-        Logs exceptions in the worker thread so that main thread knows.
-        """
-
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                func(*args, **kwargs)
-            except Exception as e:
-                self.worker_exception = e
-                raise
-
-        return wrapper
 
     def _enqueue_prices(self):
         """
@@ -414,10 +405,10 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
                 else:
                     break
 
-    def _consume_prices(self):
+    def _consume_prices(self, minute_bar_writer):
         """
-        Returns a generator that pulls (conid, prices) from the queue and
-        hands to Zipline for ingestion.
+        Pulls (conid, prices) from the queue and hands to Zipline for
+        ingestion.
         """
 
         # Consume tasks from the queue
@@ -434,7 +425,18 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             print("Ingesting {0} bars for {1} {2} (conid {3})".format(
                 len(prices.index), security.Symbol, security.SecType, conid))
 
-            yield conid, prices
+            try:
+                minute_bar_writer.write_sid(conid, prices)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                msg = "error ingesting {0} {1} (conid {2})".format(
+                    security.Symbol, security.SecType, conid)
+                print(msg)
+                print(tb)
+                logger.error("{0}, see detailed logs for traceback, continuing with next security".format(msg))
+
+                self.conids_with_errors.add(conid)
 
 def make_ingest_func(
     code,
