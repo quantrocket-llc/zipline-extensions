@@ -380,6 +380,13 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             prices = pd.read_csv(f, index_col=["Date"], parse_dates=["Date"]).drop("ConId", axis=1)
             del f
 
+            # Shift datetimes forward one minute. Why: In IB data, timestamps
+            # refer to the start of the bar, but in Zipline they refer to the
+            # end of the bar. For example, the trading activity between
+            # 15:59:00 - 16:00:00 is represented in the 15:59:00 bar in IB
+            # but the 16:00:00 bar in Zipline.
+            prices.index = prices.index + pd.Timedelta(minutes=1)
+
             # store max and min dates for asset writer
             self.min_dates[conid] = prices.index[0]
             self.max_dates[conid] = prices.index[-1]
