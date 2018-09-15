@@ -22,6 +22,7 @@ from functools import wraps
 from quantrocket.history import get_db_config, download_history_file
 from quantrocket.master import download_master_file
 from zipline_extensions.errors import BadIngestionArgument, NoData
+from zipline.data.resample import minute_frame_to_session_frame
 
 logger = logging.getLogger("quantrocket.zipline")
 logger.setLevel(logging.DEBUG)
@@ -79,7 +80,7 @@ class _BaseHistoryIngester:
 
         self._get_securities()
 
-        self._write_bars(daily_bar_writer, minute_bar_writer)
+        self._write_bars(daily_bar_writer, minute_bar_writer, calendar)
 
         self._write_assets(asset_db_writer)
 
@@ -106,7 +107,7 @@ class _BaseHistoryIngester:
 
         self.securities = pd.read_csv(f, index_col="ConId").sort_values(by="Symbol")
 
-    def _write_bars(self, daily_bar_writer, minute_bar_writer):
+    def _write_bars(self, daily_bar_writer, minute_bar_writer, calendar):
         raise NotImplementedError()
 
     def _write_assets(self, asset_db_writer):
@@ -175,7 +176,7 @@ class _BaseHistoryIngester:
 
 class DailyHistoryIngester(_BaseHistoryIngester):
 
-    def _write_bars(self, daily_bar_writer, minute_bar_writer):
+    def _write_bars(self, daily_bar_writer, minute_bar_writer, calendar):
         """
         Queries history and passes it to daily bar writer.
         """
@@ -210,7 +211,6 @@ class DailyHistoryIngester(_BaseHistoryIngester):
         daily_bar_writer.write(prices.iteritems(), assets=set(prices.items), show_progress=True)
 
     def _reindex_panel_for_mismatched_sessions(self, panel, daily_bar_writer):
-
         """
         Zipline will fail if the date index doesn't perfectly align with the
         expected calendar session, but let's just warn. We also ffill missing
@@ -317,7 +317,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         self.ingestion_worker = None
         self.conids_with_errors = set()
 
-    def _write_bars(self, daily_bar_writer, minute_bar_writer):
+    def _write_bars(self, daily_bar_writer, minute_bar_writer, calendar):
         """
         Queries history database one conid at a time and passes it to minute
         bar writer.
@@ -330,7 +330,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         self.ingestion_worker = threading.Thread(
             target=self._consume_prices,
             name="zipline_ingester",
-            args=(minute_bar_writer,)
+            args=(minute_bar_writer, daily_bar_writer, calendar)
         )
 
         self.ingestion_worker.start()
@@ -412,7 +412,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
                 else:
                     break
 
-    def _consume_prices(self, minute_bar_writer):
+    def _consume_prices(self, minute_bar_writer, daily_bar_writer, calendar):
         """
         Pulls (conid, prices) from the queue and hands to Zipline for
         ingestion.
@@ -432,8 +432,20 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             print("Ingesting {0} bars for {1} {2} (conid {3})".format(
                 len(prices.index), security.Symbol, security.SecType, conid))
 
+            # Drop any minutes that are outside of the trading session (IB
+            # data often includes bars from outside regular trading hours
+            # even when regular trading hours are requested)
+            prices = prices.tz_localize("UTC")
+            idx = prices.index.intersection(calendar.all_minutes)
+            prices = prices.reindex(index=idx)
+
             try:
+                # Ingest minute bars
                 minute_bar_writer.write_sid(conid, prices)
+                # roll up minute to daily and ingest daily
+                daily_prices = minute_frame_to_session_frame(prices, calendar)
+                daily_prices = self._reindex_and_fillna_missing_sessions(daily_prices, calendar)
+                daily_bar_writer.write([(conid, daily_prices)])
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -444,6 +456,26 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
                 logger.error("{0}, see detailed logs for traceback, continuing with next security".format(msg))
 
                 self.conids_with_errors.add(conid)
+
+    def _reindex_and_fillna_missing_sessions(self, daily_prices, calendar):
+        """
+        Reindexes the rolled-up daily bars to align with the trading
+        calendar, and fills missing values. See docstrings in
+        DailyHistoryIngester._reindex_panel_for_mismatched_sessions and
+        DailyHistoryIngester.fillna_panel
+        """
+        required_idx = calendar.sessions_in_range(
+            daily_prices.index.min(), daily_prices.index.max())
+
+        daily_prices = daily_prices.reindex(index=required_idx)
+
+        daily_prices.volume.fillna(0, inplace=True)
+        daily_prices.close.fillna(method="ffill", inplace=True)
+        daily_prices.loc[:, "open"] = daily_prices.open.fillna(daily_prices.close.shift())
+        daily_prices.loc[:, "high"] = daily_prices.high.fillna(daily_prices.close.shift())
+        daily_prices.loc[:, "low"] = daily_prices.low.fillna(daily_prices.close.shift())
+
+        return daily_prices
 
 def make_ingest_func(
     code,
