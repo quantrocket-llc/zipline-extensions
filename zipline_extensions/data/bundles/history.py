@@ -313,9 +313,14 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         super(MinutelyHistoryIngester, self).__init__(*args, **kwargs)
         # Create a one-item queue for Zipline's minute_bar_writer to consume
         # items from
-        self.ingestion_queue = queue.Queue(maxsize=1)
-        self.ingestion_worker = None
+        self.minute_ingestion_queue = queue.Queue(maxsize=1)
+        self.minute_ingestion_worker = None
+        # For rolled-up daily bars, Zipline will be passed an iterator which
+        # consumes daily prices from this queue
+        self.daily_ingestion_queue = queue.Queue()
+        self.daily_ingestion_worker = None
         self.conids_with_errors = set()
+        self.daily_worker_exception = None
 
     def _write_bars(self, daily_bar_writer, minute_bar_writer, calendar):
         """
@@ -327,21 +332,38 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
 
         # Create a thread that will run consume securities from the queue and
         # pass to the minute_bar_writer
-        self.ingestion_worker = threading.Thread(
+        self.minute_ingestion_worker = threading.Thread(
             target=self._consume_prices,
-            name="zipline_ingester",
-            args=(minute_bar_writer, daily_bar_writer, calendar)
+            name="zipline_minute_ingester",
+            args=(minute_bar_writer, calendar)
         )
 
-        self.ingestion_worker.start()
+        # Create a thread that will run daily_bar_writer.write, which will
+        # ingest data yielded from the queue in self._daily_prices_iterator
+        self.daily_ingestion_worker = threading.Thread(
+            target=self._log_daily_worker_exceptions(daily_bar_writer.write),
+            name="zipline_daily_ingester",
+            args=(self._daily_prices_iterator(),),
+        )
+
+        self.minute_ingestion_worker.start()
+        self.daily_ingestion_worker.start()
 
         # Begin querying prices conid by conid
         self._enqueue_prices()
 
-        # Place termination signal on queue
-        self.ingestion_queue.put(None)
+        # Place termination signal on minute queue
+        self.minute_ingestion_queue.put(None)
 
-        self.ingestion_worker.join()
+        self.minute_ingestion_worker.join()
+
+        # After minute queue is done, place termination signal on daily queue
+        self.daily_ingestion_queue.put(None)
+
+        self.daily_ingestion_worker.join()
+
+        if self.daily_worker_exception:
+            raise self.daily_worker_exception
 
         if self.conids_with_errors:
             logger.error("skipped {0} securities with errors".format(len(self.conids_with_errors)))
@@ -360,6 +382,9 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         the ingestion queue.
         """
         for conid, security in self.securities.iterrows():
+
+            if self.daily_worker_exception:
+                raise self.daily_worker_exception
 
             f = io.StringIO()
             try:
@@ -402,17 +427,9 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             # Due to the queue size of 1, this will block if anything is
             # already on the queue. This prevents loading too much data into
             # memory.
-            while True:
-                try:
-                    self.ingestion_queue.put((conid, security, prices), timeout=5)
-                except queue.Full:
-                    if self.worker_exception:
-                        print("exiting main thread after exception in ingestion thread")
-                        raise self.worker_exception
-                else:
-                    break
+            self.minute_ingestion_queue.put((conid, security, prices))
 
-    def _consume_prices(self, minute_bar_writer, daily_bar_writer, calendar):
+    def _consume_prices(self, minute_bar_writer, calendar):
         """
         Pulls (conid, prices) from the queue and hands to Zipline for
         ingestion.
@@ -421,7 +438,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         # Consume tasks from the queue
         while True:
 
-            security = self.ingestion_queue.get()
+            security = self.minute_ingestion_queue.get()
 
             # None indicates to terminate the worker
             if security is None:
@@ -429,7 +446,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
 
             conid, security, prices = security
 
-            print("Ingesting {0} bars for {1} {2} (conid {3})".format(
+            print("Ingesting {0} minute bars for {1} {2} (conid {3})".format(
                 len(prices.index), security.Symbol, security.SecType, conid))
 
             # Drop any minutes that are outside of the trading session (IB
@@ -442,10 +459,10 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             try:
                 # Ingest minute bars
                 minute_bar_writer.write_sid(conid, prices)
-                # roll up minute to daily and ingest daily
+                # roll up minute to daily and enqueue to ingest daily
                 daily_prices = minute_frame_to_session_frame(prices, calendar)
                 daily_prices = self._reindex_and_fillna_missing_sessions(daily_prices, calendar)
-                daily_bar_writer.write([(conid, daily_prices)])
+                self.daily_ingestion_queue.put((conid, security, daily_prices))
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
@@ -476,6 +493,43 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         daily_prices.loc[:, "low"] = daily_prices.low.fillna(daily_prices.close.shift())
 
         return daily_prices
+
+    def _log_daily_worker_exceptions(self, func):
+        """
+        Logs exceptions in the daily worker thread so the main thread knows.
+        """
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                self.daily_worker_exception = e
+                raise
+
+        return wrapper
+
+    def _daily_prices_iterator(self):
+        """
+        Returns a generator that pulls (conid, daily_prices) from the
+        daily_ingestion_queue and hands to Zipline for ingestion.
+        """
+
+        # Consume tasks from the queue
+        while True:
+
+            security = self.daily_ingestion_queue.get()
+
+            # None indicates to terminate the worker
+            if security is None:
+                break
+
+            conid, security, prices = security
+
+            print("Ingesting {0} rolled-up daily bars for {1} {2} (conid {3})".format(
+                len(prices.index), security.Symbol, security.SecType, conid))
+
+            yield conid, prices
 
 def make_ingest_func(
     code,
