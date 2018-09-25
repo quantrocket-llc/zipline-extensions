@@ -558,9 +558,7 @@ def make_ingest_func(
 
     if not universes and not conids:
         universes = db_config.get("universes", None)
-        if not universes:
-            raise BadIngestionArgument(
-            "1 or more universes is required but {0} defines none".format(code))
+        conids = db_config.get("conids", None)
 
     if bar_size == "1 day":
         ingester_cls = DailyHistoryIngester
