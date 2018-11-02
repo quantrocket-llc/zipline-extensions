@@ -101,7 +101,6 @@ class _BaseHistoryIngester:
             conids=self.conids,
             exclude_universes=self.exclude_universes,
             exclude_conids=self.exclude_conids,
-            delisted=True,
             fields=["ConId", "PrimaryExchange", "Symbol", "SecType",
                     "LocalSymbol", "LongName", "MinTick",
                     "Multiplier", "LastTradeDate", "ContractMonth",
