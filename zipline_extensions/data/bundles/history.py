@@ -51,8 +51,7 @@ class _BaseHistoryIngester:
         universes=None,
         sids=None,
         exclude_universes=None,
-        exclude_sids=None,
-        domain=None):
+        exclude_sids=None):
 
         self.code = code
         self.start_date = start_date
@@ -61,7 +60,6 @@ class _BaseHistoryIngester:
         self.sids = sids
         self.exclude_universes = exclude_universes
         self.exclude_sids = exclude_sids
-        self.domain = domain
         self.securities = None # DataFrame of securities
         self.min_dates = None # Series of sid: min date
         self.max_dates = None # Series of sid: max date
@@ -104,8 +102,7 @@ class _BaseHistoryIngester:
             fields=["Sid", "Exchange", "Symbol", "SecType",
                     "IBKR_Symbol", "LongName", "IBKR_MinTick",
                     "Multiplier", "IBKR_LastTradeDate", "IBKR_ContractMonth",
-                    "Timezone", "IBKR_UnderConId"],
-            domain=self.domain)
+                    "Timezone", "IBKR_UnderConId"])
 
         self.securities = pd.read_csv(f, index_col="Sid").sort_values(by="Symbol")
 
@@ -547,7 +544,6 @@ def make_ingest_func(
 
     db_config = get_db_config(code)
     bar_size = db_config.get("bar_size", None)
-    domain = db_config.get("domain", None)
 
     if bar_size not in ("1 min", "1 day"):
         raise BadIngestionArgument(
@@ -571,8 +567,7 @@ def make_ingest_func(
         universes=universes,
         sids=sids,
         exclude_universes=exclude_universes,
-        exclude_sids=exclude_sids,
-        domain=domain
+        exclude_sids=exclude_sids
     )
 
     return ingester.ingest
