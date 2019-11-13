@@ -49,22 +49,22 @@ class _BaseHistoryIngester:
         start_date=None,
         end_date=None,
         universes=None,
-        conids=None,
+        sids=None,
         exclude_universes=None,
-        exclude_conids=None,
+        exclude_sids=None,
         domain=None):
 
         self.code = code
         self.start_date = start_date
         self.end_date = end_date
         self.universes = universes
-        self.conids = conids
+        self.sids = sids
         self.exclude_universes = exclude_universes
-        self.exclude_conids = exclude_conids
+        self.exclude_sids = exclude_sids
         self.domain = domain
         self.securities = None # DataFrame of securities
-        self.min_dates = None # Series of conid: min date
-        self.max_dates = None # Series of conid: max date
+        self.min_dates = None # Series of sid: min date
+        self.max_dates = None # Series of sid: max date
 
     def ingest(
         self,
@@ -98,16 +98,16 @@ class _BaseHistoryIngester:
         download_master_file(
             f,
             universes=self.universes,
-            conids=self.conids,
+            sids=self.sids,
             exclude_universes=self.exclude_universes,
-            exclude_conids=self.exclude_conids,
-            fields=["ConId", "PrimaryExchange", "Symbol", "SecType",
-                    "LocalSymbol", "LongName", "MinTick",
-                    "Multiplier", "LastTradeDate", "ContractMonth",
-                    "Timezone", "UnderConId"],
+            exclude_sids=self.exclude_sids,
+            fields=["Sid", "Exchange", "Symbol", "SecType",
+                    "IBKR_Symbol", "LongName", "IBKR_MinTick",
+                    "Multiplier", "IBKR_LastTradeDate", "IBKR_ContractMonth",
+                    "Timezone", "IBKR_UnderConId"],
             domain=self.domain)
 
-        self.securities = pd.read_csv(f, index_col="ConId").sort_values(by="Symbol")
+        self.securities = pd.read_csv(f, index_col="Sid").sort_values(by="Symbol")
 
     def _write_bars(self, daily_bar_writer, minute_bar_writer, calendar):
         raise NotImplementedError()
@@ -125,12 +125,12 @@ class _BaseHistoryIngester:
         self.securities = self.securities.join(self.min_dates, how="inner").join(self.max_dates, how="inner")
         self.securities["first_traded"] = self.securities["start_date"]
 
-        self.securities[["Symbol", "LocalSymbol"]] = self.securities[["Symbol", "LocalSymbol"]].astype(str)
+        self.securities[["IBKR_Symbol", "Symbol"]] = self.securities[["IBKR_Symbol", "Symbol"]].astype(str)
 
         exchanges = pd.DataFrame(
-            self.securities, columns=["PrimaryExchange","Timezone"]).drop_duplicates()
+            self.securities, columns=["Exchange","Timezone"]).drop_duplicates()
         exchanges = exchanges.rename(columns={
-            "PrimaryExchange": "exchange",
+            "Exchange": "exchange",
             "Timezone": "timezone"
             })
 
@@ -138,9 +138,9 @@ class _BaseHistoryIngester:
         if equities.empty:
             equities = None
         else:
-            equities = pd.DataFrame(equities, columns=["PrimaryExchange", "Symbol", "LongName", "start_date", "end_date", "first_traded"])
+            equities = pd.DataFrame(equities, columns=["Exchange", "Symbol", "LongName", "start_date", "end_date", "first_traded"])
             equities = equities.rename(columns={
-                "PrimaryExchange": "exchange",
+                "Exchange": "exchange",
                 "Symbol": "symbol",
                 "LongName": "asset_name"
             })
@@ -153,22 +153,22 @@ class _BaseHistoryIngester:
             root_symbols = None
         else:
             # Concat local symbol plus contract month to ensure unique symbol
-            futures["symbol"] = futures.LocalSymbol.str.cat(
-                futures.ContractMonth.astype(str), "-")
+            futures["symbol"] = futures.Symbol.str.cat(
+                futures.IBKR_ContractMonth.astype(str), "-")
 
             futures = futures.rename(columns={
-                "PrimaryExchange": "exchange",
-                "Symbol": "root_symbol",
+                "Exchange": "exchange",
+                "IBKR_Symbol": "root_symbol",
                 "LongName": "asset_name",
                 "Multiplier": "multiplier",
-                "MinTick": "tick_size",
-                "LastTradeDate": "auto_close_date",
-                "UnderConId": "root_symbol_id"
+                "IBKR_MinTick": "tick_size",
+                "IBKR_LastTradeDate": "auto_close_date",
+                "IBKR_UnderConId": "root_symbol_id"
             })
             futures["expiration_date"] = futures.auto_close_date
             root_symbols = pd.DataFrame(
                 futures, columns=["root_symbol", "exchange", "root_symbol_id"]).drop_duplicates()
-            futures = futures.drop(["root_symbol_id", "LocalSymbol", "ContractMonth", "SecType"], axis=1)
+            futures = futures.drop(["root_symbol_id", "Symbol", "IBKR_ContractMonth", "SecType"], axis=1)
 
         asset_db_writer.write(
                 equities=equities,
@@ -188,18 +188,18 @@ class DailyHistoryIngester(_BaseHistoryIngester):
             start_date=self.start_date,
             end_date=self.end_date,
             universes=self.universes,
-            conids=self.conids,
+            sids=self.sids,
             exclude_universes=self.exclude_universes,
-            exclude_conids=self.exclude_conids,
+            exclude_sids=self.exclude_sids,
             fields=["Open","Close","High","Low","Volume"])
-        prices = pd.read_csv(f, index_col=["Date","ConId"], parse_dates=["Date"])
+        prices = pd.read_csv(f, index_col=["Date","Sid"], parse_dates=["Date"])
         del f
 
         # store max and min dates for asset writer
-        grouped_by_conid = prices.reset_index().groupby("ConId")
-        self.max_dates = grouped_by_conid.Date.max()
-        self.min_dates = grouped_by_conid.Date.min()
-        del grouped_by_conid
+        grouped_by_sid = prices.reset_index().groupby("Sid")
+        self.max_dates = grouped_by_sid.Date.max()
+        self.min_dates = grouped_by_sid.Date.min()
+        del grouped_by_sid
 
         prices = prices.to_panel().swapaxes("items","minor").rename(minor={
             "Volume": "volume",
@@ -321,12 +321,12 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         # consumes daily prices from this queue
         self.daily_ingestion_queue = queue.Queue()
         self.daily_ingestion_worker = None
-        self.conids_with_errors = set()
+        self.sids_with_errors = set()
         self.daily_worker_exception = None
 
     def _write_bars(self, daily_bar_writer, minute_bar_writer, calendar):
         """
-        Queries history database one conid at a time and passes it to minute
+        Queries history database one sid at a time and passes it to minute
         bar writer.
         """
         self.min_dates = {}
@@ -351,7 +351,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         self.minute_ingestion_worker.start()
         self.daily_ingestion_worker.start()
 
-        # Begin querying prices conid by conid
+        # Begin querying prices sid by sid
         self._enqueue_prices()
 
         # Place termination signal on minute queue
@@ -367,8 +367,8 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
         if self.daily_worker_exception:
             raise self.daily_worker_exception
 
-        if self.conids_with_errors:
-            logger.error("skipped {0} securities with errors".format(len(self.conids_with_errors)))
+        if self.sids_with_errors:
+            logger.error("skipped {0} securities with errors".format(len(self.sids_with_errors)))
 
         if not self.max_dates:
             raise NoData("No data found in {0} matching the ingestion parameters".format(
@@ -380,10 +380,10 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
 
     def _enqueue_prices(self):
         """
-        Queries history one conid at a time and places the price history on
+        Queries history one sid at a time and places the price history on
         the ingestion queue.
         """
-        for conid, security in self.securities.iterrows():
+        for sid, security in self.securities.iterrows():
 
             if self.daily_worker_exception:
                 raise self.daily_worker_exception
@@ -394,17 +394,17 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
                     self.code, f,
                     start_date=self.start_date,
                     end_date=self.end_date,
-                    conids=[conid],
+                    sids=[sid],
                     fields=["Open","Close","High","Low","Volume"])
             except requests.HTTPError as e:
                 if "no history matches the query parameters" in repr(e):
-                    print("No history to ingest for {0} {1} (conid {2})".format(
-                        security.Symbol, security.SecType, conid))
+                    print("No history to ingest for {0} {1} (sid {2})".format(
+                        security.Symbol, security.SecType, sid))
                     continue
                 else:
                     raise
 
-            prices = pd.read_csv(f, index_col=["Date"], parse_dates=["Date"]).drop("ConId", axis=1)
+            prices = pd.read_csv(f, index_col=["Date"], parse_dates=["Date"]).drop("Sid", axis=1)
             del f
 
             # Shift datetimes forward one minute. Why: In IB data, timestamps
@@ -415,8 +415,8 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             prices.index = prices.index + pd.Timedelta(minutes=1)
 
             # store max and min dates for asset writer
-            self.min_dates[conid] = prices.index[0]
-            self.max_dates[conid] = prices.index[-1]
+            self.min_dates[sid] = prices.index[0]
+            self.max_dates[sid] = prices.index[-1]
 
             prices = prices.rename(columns={
                 "Volume": "volume",
@@ -429,11 +429,11 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             # Due to the queue size of 1, this will block if anything is
             # already on the queue. This prevents loading too much data into
             # memory.
-            self.minute_ingestion_queue.put((conid, security, prices))
+            self.minute_ingestion_queue.put((sid, security, prices))
 
     def _consume_prices(self, minute_bar_writer, calendar):
         """
-        Pulls (conid, prices) from the queue and hands to Zipline for
+        Pulls (sid, prices) from the queue and hands to Zipline for
         ingestion.
         """
 
@@ -446,10 +446,10 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             if security is None:
                 break
 
-            conid, security, prices = security
+            sid, security, prices = security
 
-            print("Ingesting {0} minute bars for {1} {2} (conid {3})".format(
-                len(prices.index), security.Symbol, security.SecType, conid))
+            print("Ingesting {0} minute bars for {1} {2} (sid {3})".format(
+                len(prices.index), security.Symbol, security.SecType, sid))
 
             # Drop any minutes that are outside of the trading session (IB
             # data often includes bars from outside regular trading hours
@@ -460,21 +460,21 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
 
             try:
                 # Ingest minute bars
-                minute_bar_writer.write_sid(conid, prices)
+                minute_bar_writer.write_sid(sid, prices)
                 # roll up minute to daily and enqueue to ingest daily
                 daily_prices = minute_frame_to_session_frame(prices, calendar)
                 daily_prices = self._reindex_and_fillna_missing_sessions(daily_prices, calendar)
-                self.daily_ingestion_queue.put((conid, security, daily_prices))
+                self.daily_ingestion_queue.put((sid, security, daily_prices))
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
-                msg = "error ingesting {0} {1} (conid {2})".format(
-                    security.Symbol, security.SecType, conid)
+                msg = "error ingesting {0} {1} (sid {2})".format(
+                    security.Symbol, security.SecType, sid)
                 print(msg)
                 print(tb)
                 logger.error("{0}, see detailed logs for traceback, continuing with next security".format(msg))
 
-                self.conids_with_errors.add(conid)
+                self.sids_with_errors.add(sid)
 
     def _reindex_and_fillna_missing_sessions(self, daily_prices, calendar):
         """
@@ -513,7 +513,7 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
 
     def _daily_prices_iterator(self):
         """
-        Returns a generator that pulls (conid, daily_prices) from the
+        Returns a generator that pulls (sid, daily_prices) from the
         daily_ingestion_queue and hands to Zipline for ingestion.
         """
 
@@ -526,21 +526,21 @@ class MinutelyHistoryIngester(_BaseHistoryIngester):
             if security is None:
                 break
 
-            conid, security, prices = security
+            sid, security, prices = security
 
-            print("Ingesting {0} rolled-up daily bars for {1} {2} (conid {3})".format(
-                len(prices.index), security.Symbol, security.SecType, conid))
+            print("Ingesting {0} rolled-up daily bars for {1} {2} (sid {3})".format(
+                len(prices.index), security.Symbol, security.SecType, sid))
 
-            yield conid, prices
+            yield sid, prices
 
 def make_ingest_func(
     code,
     start_date=None,
     end_date=None,
     universes=None,
-    conids=None,
+    sids=None,
     exclude_universes=None,
-    exclude_conids=None):
+    exclude_sids=None):
     """
     Returns a bundle ingestion function.
     """
@@ -555,9 +555,9 @@ def make_ingest_func(
             code, bar_size)
         )
 
-    if not universes and not conids:
+    if not universes and not sids:
         universes = db_config.get("universes", None)
-        conids = db_config.get("conids", None)
+        sids = db_config.get("sids", None)
 
     if bar_size == "1 day":
         ingester_cls = DailyHistoryIngester
@@ -569,9 +569,9 @@ def make_ingest_func(
         start_date=start_date,
         end_date=end_date,
         universes=universes,
-        conids=conids,
+        sids=sids,
         exclude_universes=exclude_universes,
-        exclude_conids=exclude_conids,
+        exclude_sids=exclude_sids,
         domain=domain
     )
 
