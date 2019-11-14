@@ -101,7 +101,7 @@ class _BaseHistoryIngester:
             exclude_sids=self.exclude_sids,
             fields=["Sid", "Exchange", "Symbol", "SecType",
                     "IBKR_Symbol", "LongName", "IBKR_MinTick",
-                    "Multiplier", "IBKR_LastTradeDate", "IBKR_ContractMonth",
+                    "Multiplier", "LastTradeDate",
                     "Timezone", "IBKR_UnderConId"])
 
         self.securities = pd.read_csv(f, index_col="Sid").sort_values(by="Symbol")
@@ -149,9 +149,9 @@ class _BaseHistoryIngester:
             futures = None
             root_symbols = None
         else:
-            # Concat local symbol plus contract month to ensure unique symbol
+            # Concat local symbol plus last trade date to ensure unique symbol
             futures["symbol"] = futures.Symbol.str.cat(
-                futures.IBKR_ContractMonth.astype(str), "-")
+                futures.LastTradeDate.astype(str), "-")
 
             futures = futures.rename(columns={
                 "Exchange": "exchange",
@@ -159,13 +159,13 @@ class _BaseHistoryIngester:
                 "LongName": "asset_name",
                 "Multiplier": "multiplier",
                 "IBKR_MinTick": "tick_size",
-                "IBKR_LastTradeDate": "auto_close_date",
+                "LastTradeDate": "auto_close_date",
                 "IBKR_UnderConId": "root_symbol_id"
             })
             futures["expiration_date"] = futures.auto_close_date
             root_symbols = pd.DataFrame(
                 futures, columns=["root_symbol", "exchange", "root_symbol_id"]).drop_duplicates()
-            futures = futures.drop(["root_symbol_id", "Symbol", "IBKR_ContractMonth", "SecType"], axis=1)
+            futures = futures.drop(["root_symbol_id", "Symbol", "SecType"], axis=1)
 
         asset_db_writer.write(
                 equities=equities,
