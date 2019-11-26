@@ -100,9 +100,9 @@ class _BaseHistoryIngester:
             exclude_universes=self.exclude_universes,
             exclude_sids=self.exclude_sids,
             fields=["Sid", "Exchange", "Symbol", "SecType",
-                    "IBKR_Symbol", "LongName", "IBKR_MinTick",
+                    "ibkr_Symbol", "LongName", "ibkr_MinTick",
                     "Multiplier", "LastTradeDate",
-                    "Timezone", "IBKR_UnderConId"])
+                    "Timezone", "ibkr_UnderConId"])
 
         self.securities = pd.read_csv(f, index_col="Sid").sort_values(by="Symbol")
 
@@ -122,7 +122,7 @@ class _BaseHistoryIngester:
         self.securities = self.securities.join(self.min_dates, how="inner").join(self.max_dates, how="inner")
         self.securities["first_traded"] = self.securities["start_date"]
 
-        self.securities[["IBKR_Symbol", "Symbol"]] = self.securities[["IBKR_Symbol", "Symbol"]].astype(str)
+        self.securities[["ibkr_Symbol", "Symbol"]] = self.securities[["ibkr_Symbol", "Symbol"]].astype(str)
 
         exchanges = pd.DataFrame(
             self.securities, columns=["Exchange","Timezone"]).drop_duplicates()
@@ -155,12 +155,12 @@ class _BaseHistoryIngester:
 
             futures = futures.rename(columns={
                 "Exchange": "exchange",
-                "IBKR_Symbol": "root_symbol",
+                "ibkr_Symbol": "root_symbol",
                 "LongName": "asset_name",
                 "Multiplier": "multiplier",
-                "IBKR_MinTick": "tick_size",
+                "ibkr_MinTick": "tick_size",
                 "LastTradeDate": "auto_close_date",
-                "IBKR_UnderConId": "root_symbol_id"
+                "ibkr_UnderConId": "root_symbol_id"
             })
             futures["expiration_date"] = futures.auto_close_date
             root_symbols = pd.DataFrame(
