@@ -99,10 +99,20 @@ class _BaseHistoryIngester:
             sids=self.sids,
             exclude_universes=self.exclude_universes,
             exclude_sids=self.exclude_sids,
-            fields=["Sid", "Exchange", "Symbol", "SecType",
-                    "ibkr_Symbol", "LongName", "ibkr_MinTick",
-                    "Multiplier", "LastTradeDate",
-                    "Timezone", "ibkr_UnderConId"])
+            fields=[
+                "Sid",
+                "Exchange",
+                "Symbol",
+                "SecType",
+                "LongName",
+                "DateDelisted",
+                "Timezone",
+                # for futures only
+                "ibkr_MinTick",
+                "ibkr_Symbol",
+                "Multiplier",
+                "LastTradeDate",
+                "ibkr_UnderConId"])
 
         self.securities = pd.read_csv(f, index_col="Sid").sort_values(by="Symbol")
 
@@ -122,7 +132,9 @@ class _BaseHistoryIngester:
         self.securities = self.securities.join(self.min_dates, how="inner").join(self.max_dates, how="inner")
         self.securities["first_traded"] = self.securities["start_date"]
 
-        self.securities[["ibkr_Symbol", "Symbol"]] = self.securities[["ibkr_Symbol", "Symbol"]].astype(str)
+        # Cast (possibly int) symbols to str
+        self.securities.loc[self.securities.Symbol.notnull(), "Symbol"] = \
+            self.securities.loc[self.securities.Symbol.notnull()].Symbol.astype(str)
 
         exchanges = pd.DataFrame(
             self.securities, columns=["Exchange","Timezone"]).drop_duplicates()
@@ -135,14 +147,15 @@ class _BaseHistoryIngester:
         if equities.empty:
             equities = None
         else:
-            equities = pd.DataFrame(equities, columns=["Exchange", "Symbol", "LongName", "start_date", "end_date", "first_traded"])
+            equities = pd.DataFrame(equities, columns=[
+                "Exchange", "Symbol", "LongName",
+                "DateDelisted", "start_date", "end_date",
+                "first_traded"])
             equities = equities.rename(columns={
-                "Exchange": "exchange",
                 "Symbol": "symbol",
+                "DateDelisted": "auto_close_date",
                 "LongName": "asset_name"
             })
-            # The auto_close date is the day after the last trade.
-            equities["auto_close_date"] = equities.end_date + pd.Timedelta(days=1)
 
         futures = self.securities[self.securities.SecType == "FUT"].copy()
         if futures.empty:
@@ -154,7 +167,6 @@ class _BaseHistoryIngester:
                 futures.LastTradeDate.astype(str), "-")
 
             futures = futures.rename(columns={
-                "Exchange": "exchange",
                 "ibkr_Symbol": "root_symbol",
                 "LongName": "asset_name",
                 "Multiplier": "multiplier",

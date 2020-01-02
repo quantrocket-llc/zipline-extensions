@@ -18,5 +18,8 @@ class ZiplineExtensionError(Exception):
 class NoData(ZiplineExtensionError):
     pass
 
-class BadIngestionArgument(ZiplineExtensionError):
+class BadArgument(ZiplineExtensionError):
+    pass
+
+class BadIngestionArgument(BadArgument):
     pass
