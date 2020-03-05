@@ -39,6 +39,14 @@ class RealtimeDatabase:
                 f"{cls.CODE} real-time database, please use zipline_extensions.data.set_realtime_db() "
                 "from your Zipline strategy code to define the mapping")
 
+    @classmethod
+    def get_fields(cls):
+        return cls.FIELDS.copy()
+
+    @classmethod
+    def is_set(cls):
+        return cls.CODE is not None
+
 def set_realtime_db(code, fields={}):
     """
     Sets the realtime database to use for querying up-to-date minute bars in
