@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pandas as pd
 from quantrocket.realtime import get_db_config
 from zipline_extensions.errors import BadArgument
 
@@ -70,14 +71,14 @@ def set_realtime_db(code, fields={}):
     --------
     Set the realtime database and map fields:
 
-    set_realtime_db(
-        "usa-stk-tick-1min",
-        fields={
-            "close": "LastPriceClose",
-            "open": "LastPriceOpen",
-            "high": "LastPriceHigh",
-            "low": "LastPriceLow",
-            "volume": "VolumeClose"})
+    >>> set_realtime_db(
+            "usa-stk-tick-1min",
+            fields={
+                "close": "LastPriceClose",
+                "open": "LastPriceOpen",
+                "high": "LastPriceHigh",
+                "low": "LastPriceLow",
+                "volume": "VolumeClose"})
     """
 
     RealtimeDatabase.CODE = code

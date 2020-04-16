@@ -330,7 +330,7 @@ class ReutersAnnualFinancials(DataSet):
     --------
     Create a CustomFactor for PB ratio:
 
-        class PriceBookRatio(CustomFactor):
+    >>> class PriceBookRatio(CustomFactor):
             inputs = [
                 USEquityPricing.close,
                 ReutersUSAnnualFinancials.ATOT,  # total assets
@@ -338,7 +338,6 @@ class ReutersAnnualFinancials(DataSet):
                 ReutersUSAnnualFinancials.QTCO  # common shares outstanding
             ]
             window_length = 1
-
             def compute(self, today, assets, out, closes, tot_assets, tot_liabilities, shares_out):
                 book_values_per_share = (tot_assets - tot_liabilities)/shares_out
                 pb_ratios = closes/book_values_per_share
@@ -791,7 +790,7 @@ class ReutersInterimFinancials(DataSet):
     --------
     Create a CustomFactor for PB ratio:
 
-        class PriceBookRatio(CustomFactor):
+    >>> class PriceBookRatio(CustomFactor):
             inputs = [
                 USEquityPricing.close,
                 ReutersUSAnnualFinancials.ATOT,  # total assets
@@ -799,7 +798,6 @@ class ReutersInterimFinancials(DataSet):
                 ReutersUSAnnualFinancials.QTCO  # common shares outstanding
             ]
             window_length = 1
-
             def compute(self, today, assets, out, closes, tot_assets, tot_liabilities, shares_out):
                 book_values_per_share = (tot_assets - tot_liabilities)/shares_out
                 pb_ratios = closes/book_values_per_share
