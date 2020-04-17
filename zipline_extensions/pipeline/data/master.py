@@ -28,6 +28,8 @@ class SecuritiesMaster(DataSet):
     Attributes
     ----------
 
+    Sid : str
+
     Symbol : str
 
     Exchange : str
@@ -449,6 +451,7 @@ class SecuritiesMaster(DataSet):
 
     >>> are_nyse_stocks = USSecuritiesMaster.Exchange.latest.eq("XNYS")
     """
+    Sid = Column(object_dtype)
     Symbol = Column(object_dtype)
     Exchange = Column(object_dtype)
     Currency = Column(object_dtype)
